@@ -27,6 +27,8 @@ Most AI assistants stop at suggestions. Pokus is different:
 "Create an itinerary for Bali"
 ```
 - Collects preferences (dates, budget, interests, pace)
+- **Searches real hotels and attractions** via Exa + Gemini extraction
+- **Interactive selection**: Arrow-key navigation to choose hotel and attractions
 - Generates multi-day itinerary with activities and meals (AI-powered when Gemini is enabled)
 - Supports iterative refinement based on feedback
 - Produces a complete, followable travel plan with packing tips and best time to visit
@@ -192,11 +194,42 @@ AI-powered capabilities:
 ### 3. Search Service (`src/services/search.ts`)
 
 Unified search interface:
-- `searchPharmacies(location)`: Find nearby pharmacies
-- `searchAttractions(destination, interests)`: Find activities
+- `findPharmacies(medicine, location)`: Find nearby pharmacies
+- `findAttractions(destination)`: Find tourist attractions
+- `findHotels(destination, nights, budget)`: Find accommodations
 - Automatic fallback from Exa to simulated data
 
-### 4. State Store (`src/core/state-store.ts`)
+### 4. Extractor Service (`src/services/extractor.ts`)
+
+Generalized LLM-based data extraction from web search results:
+
+```typescript
+// Define a schema for any entity type
+const restaurantSchema: ExtractionSchema = {
+  entityType: 'restaurant',
+  pluralName: 'restaurants',
+  description: 'restaurants and dining places',
+  fields: [
+    { name: 'name', type: 'string', required: true },
+    { name: 'cuisine', type: 'string', required: true },
+    { name: 'priceRange', type: 'string', required: false },
+  ],
+  example: { name: 'Warung Ibu Oka', cuisine: 'Balinese', priceRange: '$$' },
+};
+
+// Extract entities from raw search content
+const restaurants = await extractEntities(restaurantSchema, 'Bali', rawContent);
+```
+
+**Pre-defined schemas:**
+- `attractionExtractionSchema` - Tourist attractions
+- `hotelExtractionSchema` - Hotels and accommodations
+- `restaurantExtractionSchema` - Restaurants and cafes
+- `pharmacyExtractionSchema` - Pharmacies
+
+**No core changes needed** to add new entity types - just define a schema!
+
+### 5. State Store (`src/core/state-store.ts`)
 
 Immutable state management with:
 - **Base state**: Session, status, messages
@@ -204,7 +237,7 @@ Immutable state management with:
 - **History**: Previous states for undo/debug
 - **Listeners**: UI updates on state changes
 
-### 5. Simulation Layer (`src/simulation/`)
+### 6. Simulation Layer (`src/simulation/`)
 
 Realistic mock APIs for demo/testing:
 
@@ -253,7 +286,19 @@ Realistic mock APIs for demo/testing:
 └────────┬────────┘
          │
 ┌────────▼────────┐
-│ GEN_ITINERARY   │  ← Create multi-day plan (Gemini or template)
+│ SEARCH_OPTIONS  │  ← Search hotels & attractions (Exa + Gemini extraction)
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│ SELECT_HOTEL    │  ← User selects hotel (arrow-key navigation)
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│SELECT_ATTRACTIONS│ ← User selects attractions (multi-select)
+└────────┬────────┘
+         │
+┌────────▼────────┐
+│ GEN_ITINERARY   │  ← Create multi-day plan using selections
 └────────┬────────┘
          │
 ┌────────▼────────┐
@@ -285,6 +330,62 @@ Run with `npm start`. The CLI displays:
 - Detected task type with confidence
 - Progress spinners during operations
 - Formatted results
+
+---
+
+## Enhanced User Interface
+
+Pokus features an interactive terminal UI for better user experience:
+
+### Arrow-Key Selection
+
+Instead of typing numbers, navigate with arrow keys:
+
+```
+Select your hotel: (use arrows, enter to select)
+> The Oberoi Beach Resort, Bali
+  Four Seasons Resort Bali at Sayan
+  COMO Uma Ubud
+  Alila Villas Uluwatu
+```
+
+**Controls:**
+- `↑`/`↓` or `j`/`k` - Move cursor
+- `Enter` - Select
+- `Esc` - Cancel
+
+### Multi-Select for Attractions
+
+Select multiple attractions with checkboxes:
+
+```
+Select attractions for your trip (up to 9):
+(arrows to move, space to toggle, enter to confirm)
+> [x] Tanah Lot Temple
+  [x] Tegallalang Rice Terraces
+  [ ] Ubud Monkey Forest
+  [x] Uluwatu Temple
+Selected: 3/9
+```
+
+**Controls:**
+- `Space` - Toggle selection
+- `Ctrl+A` - Select all
+- `Enter` - Confirm selection
+
+### Display Schemas
+
+Results are displayed with structured cards showing relevant details:
+
+```
+Hotels:
+  1. Grand Hyatt Bali
+     Rating: 4.8 | $285/night | Pool, Spa, Beach Access
+
+Attractions:
+  1. Tanah Lot Temple
+     temple | 2-3 hours | $5
+```
 
 ---
 
@@ -384,7 +485,24 @@ pokus/
     ├── services/
     │   ├── gemini.ts            # Gemini AI service
     │   ├── exa-search.ts        # Exa web search
-    │   └── search.ts            # Unified search interface
+    │   ├── search.ts            # Unified search interface
+    │   └── extractor.ts         # Generalized LLM data extraction
+    │
+    ├── ui/                      # Terminal UI components
+    │   ├── types.ts             # SelectConfig, SelectResult
+    │   └── terminal/
+    │       ├── select.ts        # Arrow-key single selection
+    │       ├── multi-select.ts  # Checkbox multi-selection
+    │       └── renderer.ts      # ANSI escape utilities
+    │
+    ├── display/                 # Data display system
+    │   ├── types.ts             # ResultDisplaySchema
+    │   ├── formatters.ts        # Value formatters
+    │   ├── card-builder.ts      # Card rendering
+    │   └── schemas/             # Entity display schemas
+    │       ├── hotel.ts
+    │       ├── attraction.ts
+    │       └── pharmacy.ts
     │
     ├── tasks/
     │   ├── medicine/
