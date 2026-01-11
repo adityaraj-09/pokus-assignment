@@ -23,9 +23,12 @@ import {
   getGeminiStatus,
 } from '../../services/gemini.js';
 import { isGeminiEnabled } from '../../config.js';
+import { CardBuilder, hotelSchema, attractionSchema } from '../../display/index.js';
+import { SelectConfig, SelectResult } from '../../ui/types.js';
 
 export interface TravelWorkflowContext {
   askUser: (question: string, options?: string[]) => Promise<string>;
+  select?: <T>(config: SelectConfig<T>) => Promise<SelectResult<T>>;
   showProgress: (message: string) => Ora;
   log: (message: string) => void;
 }
@@ -36,6 +39,8 @@ export class TravelWorkflow {
   private searchMode: 'real' | 'simulated' = 'simulated';
   private attractions: AttractionResult[] = [];
   private hotels: HotelResult[] = [];
+  private selectedHotel: HotelResult | null = null;
+  private selectedAttractions: AttractionResult[] = [];
 
   constructor(context: TravelWorkflowContext) {
     this.state = createInitialTravelState();
@@ -239,6 +244,151 @@ export class TravelWorkflow {
       hotelsSpinner.fail('Failed to search hotels');
       this.hotels = [];
     }
+
+    if (this.hotels.length > 0) {
+      await this.selectHotel();
+    }
+
+    if (this.attractions.length > 0) {
+      await this.selectAttractions();
+    }
+  }
+
+  private async selectHotel(): Promise<void> {
+    this.context.log(chalk.bold.cyan('\n🏨 Available Hotels:\n'));
+
+    const hotelCardBuilder = new CardBuilder(hotelSchema);
+    this.hotels.forEach((hotel, index) => {
+      this.context.log(hotelCardBuilder.render(hotel, index));
+    });
+
+    if (this.context.select) {
+      const result = await this.context.select<HotelResult>({
+        message: 'Select your hotel:',
+        options: this.hotels.map((hotel) => ({
+          label: hotel.name,
+          value: hotel,
+          description: `${hotel.location} | Rating: ${hotel.rating} | ${hotel.pricePerNight ? `$${hotel.pricePerNight}/night` : 'Price on request'}`,
+        })),
+        mode: 'single',
+      });
+
+      if (result.cancelled) {
+        this.selectedHotel = this.hotels[0];
+      } else {
+        this.selectedHotel = result.selected as HotelResult;
+      }
+    } else {
+      const hotelOptions = this.hotels.map((hotel) => {
+        const price = hotel.pricePerNight ? `$${hotel.pricePerNight}/night` : 'Price on request';
+        return `${hotel.name} - ${price} - ★${hotel.rating}`;
+      });
+
+      const selection = await this.context.askUser('\nSelect your hotel:', hotelOptions);
+      const selectedIndex = hotelOptions.findIndex(opt => opt === selection);
+      this.selectedHotel = this.hotels[selectedIndex >= 0 ? selectedIndex : 0];
+    }
+
+    const confirmHotel = await this.context.askUser(
+      `\n✓ Confirm: Book "${this.selectedHotel.name}" for ${this.state.dates!.nights} nights?`,
+      ['Yes, confirm', 'No, choose different']
+    );
+
+    if (confirmHotel.includes('No')) {
+      await this.selectHotel();
+      return;
+    }
+
+    this.context.log(chalk.green(`\n✓ Hotel selected: ${this.selectedHotel.name}\n`));
+  }
+
+  private async selectAttractions(): Promise<void> {
+    this.context.log(chalk.bold.cyan('\n🎯 Available Attractions:\n'));
+
+    const attractionCardBuilder = new CardBuilder(attractionSchema);
+    this.attractions.forEach((attraction, index) => {
+      this.context.log(attractionCardBuilder.render(attraction, index));
+    });
+
+    const maxAttractions = Math.min(this.state.dates!.nights * 3, 10);
+
+    if (this.context.select) {
+      const result = await this.context.select<AttractionResult>({
+        message: `Select attractions for your trip (up to ${maxAttractions}):`,
+        options: this.attractions.map((attr) => ({
+          label: attr.name,
+          value: attr,
+          description: `${attr.category} | ${attr.duration || '2-3 hrs'} | ${attr.price ? `$${attr.price}` : 'Free'}`,
+        })),
+        mode: 'multi',
+        maxSelect: maxAttractions,
+        minSelect: 1,
+      });
+
+      if (result.cancelled || (result.selected as AttractionResult[]).length === 0) {
+        this.selectedAttractions = this.attractions.slice(0, 3);
+      } else {
+        this.selectedAttractions = result.selected as AttractionResult[];
+      }
+    } else {
+      this.context.log(chalk.dim(`\nYou can select up to ${maxAttractions} attractions for your ${this.state.dates!.nights}-day trip.`));
+      this.context.log(chalk.dim('Enter numbers separated by commas (e.g., 1,3,5,7):\n'));
+
+      const attractionOptions = this.attractions.map((attr, i) => {
+        const price = attr.price ? `$${attr.price}` : 'Free';
+        return `${i + 1}. ${attr.name} (${attr.category}) - ${price}`;
+      });
+
+      attractionOptions.forEach(opt => this.context.log(chalk.dim(`  ${opt}`)));
+
+      const selectionInput = await this.context.askUser(
+        `\nSelect attractions (1-${this.attractions.length}, comma-separated):`
+      );
+
+      const selectedIndices = selectionInput
+        .split(',')
+        .map(s => parseInt(s.trim()) - 1)
+        .filter(i => i >= 0 && i < this.attractions.length)
+        .slice(0, maxAttractions);
+
+      if (selectedIndices.length === 0) {
+        selectedIndices.push(0, 1, 2);
+      }
+
+      this.selectedAttractions = selectedIndices.map(i => this.attractions[i]);
+    }
+
+    this.context.log(chalk.bold.cyan('\n📋 Selected Attractions:'));
+    this.selectedAttractions.forEach((attr, i) => {
+      const price = attr.price ? `$${attr.price}` : 'Free';
+      this.context.log(`  ${i + 1}. ${attr.name} - ${price}`);
+    });
+
+    const confirmAttractions = await this.context.askUser(
+      `\n✓ Include these ${this.selectedAttractions.length} attractions in your itinerary?`,
+      ['Yes, confirm', 'No, choose again']
+    );
+
+    if (confirmAttractions.includes('No')) {
+      await this.selectAttractions();
+      return;
+    }
+
+    this.context.log(chalk.green(`\n✓ ${this.selectedAttractions.length} attractions selected\n`));
+  }
+
+  private getCategoryIcon(category: string): string {
+    const icons: Record<string, string> = {
+      temple: '🛕',
+      beach: '🏖️',
+      nature: '🌴',
+      museum: '🏛️',
+      activity: '🎯',
+      adventure: '⛰️',
+      culture: '🎭',
+      wildlife: '🐒',
+    };
+    return icons[category.toLowerCase()] || '📍';
   }
 
   private async generateItinerary(): Promise<void> {
@@ -309,20 +459,18 @@ export class TravelWorkflow {
         };
       });
 
-      const selectedHotel = this.hotels[0];
-
       const itinerary: Itinerary = {
         destination,
         dates,
         days,
-        hotel: selectedHotel ? {
-          id: selectedHotel.id,
-          name: selectedHotel.name,
-          rating: selectedHotel.rating,
-          pricePerNight: selectedHotel.pricePerNight || budget.perDay * 0.4,
-          location: selectedHotel.location,
-          amenities: selectedHotel.amenities || [],
-          reviewScore: selectedHotel.reviewScore || 8.0,
+        hotel: this.selectedHotel ? {
+          id: this.selectedHotel.id,
+          name: this.selectedHotel.name,
+          rating: this.selectedHotel.rating,
+          pricePerNight: this.selectedHotel.pricePerNight || budget.perDay * 0.4,
+          location: this.selectedHotel.location,
+          amenities: this.selectedHotel.amenities || [],
+          reviewScore: this.selectedHotel.reviewScore || 8.0,
         } : undefined,
         totalCost: geminiItinerary.totalEstimatedCost,
         version: 1,
@@ -356,7 +504,9 @@ export class TravelWorkflow {
 
     const activitiesPerDay = preferences.pace === 'relaxed' ? 2 : preferences.pace === 'moderate' ? 3 : 4;
 
-    const shuffledAttractions = [...this.attractions].sort(() => Math.random() - 0.5);
+    const attractionsToUse = this.selectedAttractions.length > 0
+      ? this.selectedAttractions
+      : [...this.attractions].sort(() => Math.random() - 0.5);
 
     for (let i = 0; i < dates.nights; i++) {
       const dayDate = new Date(dates.start);
@@ -365,8 +515,8 @@ export class TravelWorkflow {
       const dayActivities: Activity[] = [];
       const startIdx = i * activitiesPerDay;
 
-      for (let j = 0; j < activitiesPerDay && startIdx + j < shuffledAttractions.length; j++) {
-        const attraction = shuffledAttractions[startIdx + j];
+      for (let j = 0; j < activitiesPerDay && startIdx + j < attractionsToUse.length; j++) {
+        const attraction = attractionsToUse[startIdx + j];
         const times = ['9:00 AM', '11:00 AM', '2:00 PM', '4:00 PM'];
 
         dayActivities.push({
@@ -427,23 +577,22 @@ export class TravelWorkflow {
       });
     }
 
-    const selectedHotel = this.hotels[0];
-    if (selectedHotel) {
-      totalCost += (selectedHotel.pricePerNight || budget.perDay * 0.4) * dates.nights;
+    if (this.selectedHotel) {
+      totalCost += (this.selectedHotel.pricePerNight || budget.perDay * 0.4) * dates.nights;
     }
 
     const itinerary: Itinerary = {
       destination,
       dates,
       days,
-      hotel: selectedHotel ? {
-        id: selectedHotel.id,
-        name: selectedHotel.name,
-        rating: selectedHotel.rating,
-        pricePerNight: selectedHotel.pricePerNight || budget.perDay * 0.4,
-        location: selectedHotel.location,
-        amenities: selectedHotel.amenities || [],
-        reviewScore: selectedHotel.reviewScore || 8.0,
+      hotel: this.selectedHotel ? {
+        id: this.selectedHotel.id,
+        name: this.selectedHotel.name,
+        rating: this.selectedHotel.rating,
+        pricePerNight: this.selectedHotel.pricePerNight || budget.perDay * 0.4,
+        location: this.selectedHotel.location,
+        amenities: this.selectedHotel.amenities || [],
+        reviewScore: this.selectedHotel.reviewScore || 8.0,
       } : undefined,
       totalCost: Math.round(totalCost),
       version: 1,

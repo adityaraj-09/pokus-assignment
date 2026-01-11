@@ -3,70 +3,137 @@ import chalk from 'chalk';
 import ora from 'ora';
 import '../config.js';
 import { registry } from '../core/registry.js';
-import { medicineTask } from '../tasks/medicine/index.js';
-import { travelTask } from '../tasks/travel/index.js';
-import { MedicineWorkflow } from '../tasks/medicine/workflow.js';
-import { TravelWorkflow } from '../tasks/travel/workflow.js';
+import { PluginLoader } from '../core/plugin/loader.js';
+import { toolRegistry } from '../core/tools/registry.js';
 import { getSearchStatus } from '../services/search.js';
 import { getGeminiStatus } from '../services/gemini.js';
+import { SelectionAgent, ConfirmationAgent, ReviewAgent } from '../agents/shared/index.js';
+import { SelectConfig, SelectResult } from '../ui/types.js';
+import { TerminalSelect, TerminalMultiSelect } from '../ui/terminal/index.js';
 
-registry.register(medicineTask);
-registry.register(travelTask);
+import { medicinePlugin } from '../tasks/medicine/plugin.js';
+import { travelPlugin } from '../tasks/travel/plugin.js';
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-});
+let rl: readline.Interface | null = null;
+
+function getReadline(): readline.Interface {
+  if (!rl) {
+    rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+  }
+  return rl;
+}
+
+function pauseReadline(): void {
+  if (rl) {
+    rl.close();
+    rl = null;
+  }
+}
 
 function prompt(question: string): Promise<string> {
   return new Promise((resolve) => {
-    rl.question(chalk.cyan(question + ' '), (answer) => {
+    getReadline().question(chalk.cyan(question + ' '), (answer) => {
       resolve(answer);
     });
   });
 }
 
-async function selectOption(question: string, options?: string[]): Promise<string> {
-  if (options && options.length > 0) {
-    console.log(chalk.cyan('\n' + question));
-    options.forEach((opt, i) => {
-      console.log(chalk.dim(`  ${i + 1}. ${opt}`));
-    });
+async function enhancedInput<T = string>(
+  promptOrConfig: string | SelectConfig<T>,
+  options?: string[]
+): Promise<string | SelectResult<T>> {
+  if (typeof promptOrConfig === 'string') {
+    if (options && options.length > 0) {
+      // Pause readline to allow raw mode for arrow keys
+      pauseReadline();
 
-    const answer = await prompt('Enter number (1-' + options.length + '):');
-    const index = parseInt(answer) - 1;
-
-    if (index >= 0 && index < options.length) {
-      return options[index];
+      const config: SelectConfig<string> = {
+        message: promptOrConfig,
+        options: options.map((opt) => ({ label: opt, value: opt })),
+        mode: 'single',
+      };
+      const selector = new TerminalSelect(config);
+      const result = await selector.prompt();
+      if (result.cancelled) {
+        return options[0];
+      }
+      return result.selected as string;
     }
-    return options[0];
-  } else {
-    return await prompt(question);
+    return prompt(promptOrConfig);
   }
+
+  // Pause readline to allow raw mode for arrow keys
+  pauseReadline();
+
+  const config = promptOrConfig as SelectConfig<T>;
+
+  if (config.mode === 'multi') {
+    const selector = new TerminalMultiSelect(config);
+    return selector.prompt();
+  }
+
+  const selector = new TerminalSelect(config);
+  return selector.prompt();
 }
 
 async function main() {
   console.log('');
   console.log(chalk.bold.cyan('╔════════════════════════════════════════════════════════════╗'));
-  console.log(chalk.bold.cyan('║   POKUS - Real-World Task Completion System                ║'));
+  console.log(chalk.bold.cyan('║   POKUS - Multi-Agent Task Completion System               ║'));
   console.log(chalk.bold.cyan('╚════════════════════════════════════════════════════════════╝'));
   console.log('');
+
+  const pluginLoader = new PluginLoader(registry, toolRegistry);
+
+  pluginLoader.registerSharedAgent({
+    id: 'shared:selection',
+    agent: new SelectionAgent(),
+    description: 'Generic selection agent',
+    usedBy: [],
+  });
+
+  pluginLoader.registerSharedAgent({
+    id: 'shared:confirmation',
+    agent: new ConfirmationAgent(),
+    description: 'Generic confirmation agent',
+    usedBy: [],
+  });
+
+  pluginLoader.registerSharedAgent({
+    id: 'shared:review',
+    agent: new ReviewAgent(),
+    description: 'Generic review agent',
+    usedBy: [],
+  });
+
+  await pluginLoader.load(medicinePlugin);
+  await pluginLoader.load(travelPlugin);
 
   const searchStatus = getSearchStatus();
   const aiStatus = getGeminiStatus();
 
+  console.log(chalk.bold('System Status:'));
   if (aiStatus.enabled) {
-    console.log(chalk.green(`✓ Gemini AI enabled (${aiStatus.model})`));
+    console.log(chalk.green(`  ✓ Gemini AI enabled (${aiStatus.model})`));
   } else {
-    console.log(chalk.yellow('⚠ Using rule-based logic (no GEMINI_API_KEY)'));
+    console.log(chalk.yellow('  ⚠ Using rule-based logic (no GEMINI_API_KEY)'));
   }
 
   if (searchStatus.exaEnabled) {
-    console.log(chalk.green('✓ Exa API enabled\n'));
+    console.log(chalk.green('  ✓ Exa API enabled'));
   } else {
-    console.log(chalk.yellow('⚠ Using simulated data (no EXA_API_KEY)\n'));
+    console.log(chalk.yellow('  ⚠ Using simulated data (no EXA_API_KEY)'));
   }
 
+  console.log(chalk.bold('\nLoaded Plugins:'));
+  pluginLoader.listPlugins().forEach((plugin) => {
+    console.log(chalk.cyan(`  • ${plugin.name} v${plugin.version}`));
+  });
+
+  console.log('');
   console.log(chalk.dim('Try: "Find paracetamol near me" or "Create an itinerary for Bali"'));
   console.log(chalk.dim('Type "exit" to quit.\n'));
 
@@ -84,39 +151,58 @@ async function main() {
 
     const classification = await registry.classifyWithAI(userInput);
     const aiLabel = aiStatus.enabled ? chalk.cyan(' (via Gemini)') : '';
-    console.log(chalk.dim(`[Detected: ${classification.taskType} - ${(classification.confidence * 100).toFixed(0)}% confidence${aiLabel}]`));
+    console.log(
+      chalk.dim(
+        `[Detected: ${classification.taskType} - ${(classification.confidence * 100).toFixed(0)}% confidence${aiLabel}]`
+      )
+    );
 
     if (classification.confidence < 0.2) {
       console.log(chalk.yellow('\nNot sure what you mean. Try:'));
-      console.log(chalk.dim('  • "Find paracetamol near me"'));
-      console.log(chalk.dim('  • "Create an itinerary for Bali"'));
+      pluginLoader.listPlugins().forEach((plugin) => {
+        console.log(chalk.dim(`  • "${plugin.intentExamples[0]}"`));
+      });
       continue;
     }
 
-    const workflowContext = {
-      askUser: selectOption,
-      showProgress: (message: string) => ora(message).start(),
-      log: (message: string) => console.log(message),
-    };
+    const plugin = pluginLoader.getPlugin(classification.taskType);
+    if (!plugin) {
+      console.log(chalk.yellow(`\nTask type "${classification.taskType}" not available.`));
+      continue;
+    }
+
+    console.log(chalk.bold.magenta(`\n━━━ ${plugin.name.toUpperCase()} ━━━`));
 
     try {
-      if (classification.taskType === 'medicine') {
-        console.log(chalk.bold.magenta('\n━━━ MEDICINE FINDER ━━━'));
-        const workflow = new MedicineWorkflow(workflowContext);
-        await workflow.run(userInput);
+      const executor = pluginLoader.createExecutor(plugin.id, {
+        requestInput: enhancedInput,
+        log: (message: string, level?: string) => {
+          if (level === 'error') {
+            console.log(chalk.red(message));
+          } else {
+            console.log(message);
+          }
+        },
+        showProgress: (message: string) => ora(message).start(),
+      });
+
+      const result = await executor.execute(plugin.workflow, {
+        userInput,
+      });
+
+      if (result.success) {
         console.log(chalk.bold.green('\n✓ Task completed!'));
-      } else if (classification.taskType === 'travel') {
-        console.log(chalk.bold.magenta('\n━━━ TRAVEL PLANNER ━━━'));
-        const workflow = new TravelWorkflow(workflowContext);
-        await workflow.run(userInput);
-        console.log(chalk.bold.green('\n✓ Task completed!'));
+      } else {
+        console.log(chalk.red(`\nTask failed: ${result.error}`));
       }
     } catch (error) {
-      console.log(chalk.red('\nError: ' + (error instanceof Error ? error.message : 'Unknown error')));
+      console.log(
+        chalk.red('\nError: ' + (error instanceof Error ? error.message : 'Unknown error'))
+      );
     }
   }
 
-  rl.close();
+  pauseReadline();
 }
 
 main();

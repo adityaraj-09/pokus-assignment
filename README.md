@@ -46,14 +46,8 @@ cp .env.example .env
 # Build the project
 npm run build
 
-# Run the interactive CLI (Inquirer-based)
+# Run the CLI
 npm start
-
-# Or run the simple CLI (Readline-based)
-npm run simple
-
-# Run demo mode
-npm start demo
 ```
 
 ---
@@ -283,19 +277,65 @@ When Gemini is enabled, itineraries include:
 
 ---
 
-## CLI Modes
+## CLI
 
-### Interactive CLI (`npm start`)
-Uses Inquirer.js for rich interactive prompts with arrow key navigation.
-
-### Simple CLI (`npm run simple`)
-Uses Node.js readline for lightweight terminal interaction.
-
-Both modes display:
-- API status on startup
+Run with `npm start`. The CLI displays:
+- System status (Gemini AI, Exa API)
+- Loaded plugins
 - Detected task type with confidence
 - Progress spinners during operations
 - Formatted results
+
+---
+
+## Multi-Agent Architecture
+
+Pokus uses a scalable plugin-based architecture where tasks are self-contained plugins:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLI / Interface                           │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│                      Plugin Loader                               │
+│  • Auto-discovers tasks from /tasks/*/plugin.ts                 │
+│  • Registers agents, tools, workflows                           │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│                    Workflow Executor                             │
+│  • Interprets WorkflowDefinition stages                         │
+│  • Dispatches to registered agents                              │
+│  • Manages state transitions                                    │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+┌───────▼───────┐       ┌───────▼───────┐       ┌───────▼───────┐
+│ Shared Agents │       │ Domain Agents │       │    Tools      │
+│ - Selection   │       │ - MedicineInfo│       │ - Search      │
+│ - Confirmation│       │ - Itinerary   │       │ - PhoneCall   │
+│ - UserInput   │       │ - Custom...   │       │ - Booking     │
+└───────────────┘       └───────────────┘       └───────────────┘
+                                │
+                    ┌───────────▼───────────┐
+                    │    State Manager      │
+                    │  • Centralized state  │
+                    │  • Pub/sub updates    │
+                    │  • History/rollback   │
+                    └───────────────────────┘
+```
+
+### Agent Types
+
+| Category | Responsibility | Examples |
+|----------|---------------|----------|
+| **InformationGathering** | Collect user data via Q&A | `MedicineInfoAgent`, `PreferenceAgent` |
+| **Search** | Query external services | `PharmacySearchAgent`, `AttractionSearchAgent` |
+| **Generation** | Create content using LLM | `ItineraryAgent`, `RecommendationAgent` |
+| **Communication** | Interact with external services | `PharmacyCallerAgent`, `BookingAgent` |
+| **Shared** | Reusable across tasks | `SelectionAgent`, `ConfirmationAgent`, `ReviewAgent` |
 
 ---
 
@@ -314,11 +354,31 @@ pokus/
     │
     ├── core/
     │   ├── types.ts             # Shared type definitions
-    │   ├── state-store.ts       # State management
-    │   └── registry.ts          # Task registry with AI classification
+    │   ├── registry.ts          # Task registry with AI classification
+    │   ├── agent/               # Agent infrastructure
+    │   │   ├── types.ts         # Agent interfaces
+    │   │   └── base-agent.ts    # Base agent implementation
+    │   ├── state/               # State management
+    │   │   ├── types.ts         # State interfaces
+    │   │   └── manager.ts       # Centralized StateManager
+    │   ├── tools/               # Tool system
+    │   │   ├── types.ts         # Tool interfaces
+    │   │   ├── executor.ts      # Tool execution
+    │   │   └── registry.ts      # Global tool registry
+    │   ├── workflow/            # Workflow execution
+    │   │   ├── types.ts         # Workflow definitions
+    │   │   └── executor.ts      # Generic workflow executor
+    │   └── plugin/              # Plugin system
+    │       ├── types.ts         # Plugin interfaces
+    │       └── loader.ts        # Auto-discovery loader
     │
     ├── agents/
-    │   ├── base-agent.ts        # Base agent class (Gemini)
+    │   ├── shared/              # Reusable agents
+    │   │   ├── selection-agent.ts
+    │   │   ├── confirmation-agent.ts
+    │   │   ├── user-input-agent.ts
+    │   │   └── review-agent.ts
+    │   ├── base-agent.ts        # Legacy base agent
     │   └── supervisor.ts        # Supervisor agent
     │
     ├── services/
@@ -328,83 +388,99 @@ pokus/
     │
     ├── tasks/
     │   ├── medicine/
-    │   │   ├── index.ts         # Task definition
+    │   │   ├── plugin.ts        # Task plugin definition
+    │   │   ├── index.ts         # Legacy task definition
     │   │   ├── state.ts         # State schema
-    │   │   └── workflow.ts      # Workflow implementation
+    │   │   ├── workflow.ts      # Workflow implementation
+    │   │   └── agents/          # Domain-specific agents
     │   │
     │   └── travel/
-    │       ├── index.ts
-    │       ├── state.ts         # Includes AI-generated fields
-    │       └── workflow.ts      # Gemini integration for itinerary
+    │       ├── plugin.ts        # Task plugin definition
+    │       ├── index.ts         # Legacy task definition
+    │       ├── state.ts         # State schema
+    │       ├── workflow.ts      # Workflow implementation
+    │       └── agents/          # Domain-specific agents
     │
     ├── simulation/
     │   ├── data-generator.ts    # Mock data generation
     │   └── phone-call.ts        # Call simulation
     │
     └── cli/
-        ├── index.ts             # Inquirer-based CLI
-        ├── simple.ts            # Readline-based CLI
-        └── prompts.ts           # User interaction utilities
+        └── simple.ts            # Plugin-based CLI
 ```
 
 ---
 
 ## Scalability: Adding New Tasks
 
-Adding a new task (e.g., "Book a plumber") requires:
+With the plugin architecture, adding a new task (e.g., "Book a plumber") is simple:
 
 ### 1. Create Task Directory
 
 ```
 src/tasks/plumber/
-├── index.ts      # Task definition
+├── plugin.ts     # Plugin definition (required)
 ├── state.ts      # State schema
-└── workflow.ts   # Workflow implementation
+└── agents/       # Domain-specific agents
+    └── workflow-adapter.ts
 ```
 
-### 2. Define Task Schema
+### 2. Create Plugin Definition
 
 ```typescript
-export const PlumberStateSchema = BaseStateSchema.extend({
-  domain: z.literal('plumber'),
-  issueType: z.string().optional(),
-  urgency: z.enum(['emergency', 'urgent', 'scheduled']).optional(),
-  preferredTime: z.string().optional(),
-  selectedPlumber: PlumberSchema.optional(),
-  booking: BookingSchema.optional(),
-});
-```
+// src/tasks/plumber/plugin.ts
+import { TaskPlugin } from '../../core/plugin/types.js';
+import { PlumberStateSchema, createInitialState } from './state.js';
+import { PlumberWorkflowAdapter } from './agents/workflow-adapter.js';
 
-### 3. Implement Workflow
+export const plumberPlugin: TaskPlugin = {
+  id: 'plumber',
+  name: 'Book a Plumber',
+  version: '1.0.0',
+  description: 'Find and book plumbers for repairs',
 
-```typescript
-export class PlumberWorkflow {
-  async run(input: string): Promise<PlumberState> {
-    await this.gatherIssueDetails(input);
-    await this.findPlumbers();
-    await this.checkAvailability();
-    await this.bookAppointment();
-    return this.getState();
-  }
-}
-```
-
-### 4. Register Task
-
-```typescript
-export const plumberTask: TaskDefinition = {
-  type: 'plumber',
-  name: 'Plumber Booking',
   patterns: ['plumber', 'pipe', 'leak', 'drain', 'faucet'],
   intentExamples: ['I need a plumber', 'fix my leaky pipe'],
-  createInitialState: () => createInitialPlumberState(),
-  workflow: plumberWorkflow,
+
+  stateSchema: PlumberStateSchema,
+  createInitialState,
+
+  workflow: {
+    id: 'plumber',
+    name: 'Plumber Booking Workflow',
+    description: 'Find and book plumbers',
+    version: '1.0.0',
+    initialStage: 'execute',
+    stages: [
+      {
+        id: 'execute',
+        name: 'Execute Plumber Workflow',
+        agent: 'plumber:workflow',
+        next: null,
+      },
+    ],
+  },
+
+  agents: [new PlumberWorkflowAdapter()],
+  tools: [],
 };
 
-registry.register(plumberTask);
+export default plumberPlugin;
 ```
 
-**No changes to core system required.**
+### 3. Load Plugin in CLI
+
+```typescript
+import { plumberPlugin } from '../tasks/plumber/plugin.js';
+await pluginLoader.load(plumberPlugin);
+```
+
+**Result:** New task works immediately with:
+- ✓ No changes to core system
+- ✓ Automatic intent classification
+- ✓ Workflow execution via plugin system
+- ✓ State management via StateManager
+- ✓ Access to shared agents (selection, confirmation, etc.)
 
 ---
 

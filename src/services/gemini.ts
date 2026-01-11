@@ -285,3 +285,133 @@ export function getGeminiStatus(): {
     message: 'Gemini AI not configured - using rule-based logic. Set GEMINI_API_KEY to enable AI.',
   };
 }
+
+export interface ExtractedAttraction {
+  name: string;
+  category: string;
+  description: string;
+  duration?: string;
+  price?: number;
+}
+
+export interface ExtractedHotel {
+  name: string;
+  rating: number;
+  pricePerNight?: number;
+  location: string;
+  amenities?: string[];
+}
+
+export async function extractAttractionsFromContent(
+  destination: string,
+  rawContent: Array<{ title: string; snippet: string; url: string }>
+): Promise<ExtractedAttraction[]> {
+  if (!isGeminiEnabled()) {
+    return [];
+  }
+
+  const gemini = getModel();
+
+  const contentSummary = rawContent
+    .slice(0, 5)
+    .map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet.slice(0, 300)}`)
+    .join('\n\n');
+
+  const prompt = `You are a travel data extraction expert. Extract individual tourist attractions from these search results about ${destination}.
+
+Search results:
+${contentSummary}
+
+Extract 8-12 specific attractions (temples, beaches, landmarks, museums, etc.) mentioned in the content.
+Do NOT include article titles or website names as attractions.
+Only extract actual places a tourist would visit.
+
+Respond in JSON format only:
+{
+  "attractions": [
+    {
+      "name": "Tanah Lot Temple",
+      "category": "temple",
+      "description": "Iconic sea temple perched on a rocky outcrop",
+      "duration": "2-3 hours",
+      "price": 5
+    }
+  ]
+}
+
+Categories: temple, beach, nature, museum, landmark, market, adventure, wildlife, culture
+Set price to 0 for free attractions, or estimate typical entry fee in USD.`;
+
+  try {
+    const result = await gemini.generateContent(prompt);
+    const response = result.response.text();
+
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return (parsed.attractions || []).slice(0, 15);
+    }
+  } catch (error) {
+    console.error('Gemini attraction extraction error:', error);
+  }
+
+  return [];
+}
+
+export async function extractHotelsFromContent(
+  destination: string,
+  budget: string,
+  rawContent: Array<{ title: string; snippet: string; url: string }>
+): Promise<ExtractedHotel[]> {
+  if (!isGeminiEnabled()) {
+    return [];
+  }
+
+  const gemini = getModel();
+
+  const contentSummary = rawContent
+    .slice(0, 5)
+    .map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet.slice(0, 300)}`)
+    .join('\n\n');
+
+  const prompt = `You are a travel data extraction expert. Extract specific hotel names from these search results about ${destination}.
+
+Search results:
+${contentSummary}
+
+Budget preference: ${budget}
+
+Extract 5-8 specific hotels mentioned in the content.
+Do NOT include article titles or website names as hotels.
+Only extract actual hotels where a tourist would stay.
+
+Respond in JSON format only:
+{
+  "hotels": [
+    {
+      "name": "Grand Hyatt Bali",
+      "rating": 4.8,
+      "pricePerNight": 285,
+      "location": "Nusa Dua, Bali",
+      "amenities": ["Pool", "Spa", "Beach Access", "Restaurant"]
+    }
+  ]
+}
+
+Estimate realistic prices based on ${budget} budget and the destination.`;
+
+  try {
+    const result = await gemini.generateContent(prompt);
+    const response = result.response.text();
+
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return (parsed.hotels || []).slice(0, 8);
+    }
+  } catch (error) {
+    console.error('Gemini hotel extraction error:', error);
+  }
+
+  return [];
+}

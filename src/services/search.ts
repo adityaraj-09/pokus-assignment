@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { config, isSearchEnabled, getSearchMode } from '../config.js';
+import { config, isSearchEnabled, getSearchMode, isGeminiEnabled } from '../config.js';
 import {
   searchPharmacies as exaSearchPharmacies,
   searchDestination as exaSearchDestination,
@@ -15,6 +15,10 @@ import {
   SimulatedHotel,
 } from '../simulation/data-generator.js';
 import { Coordinates } from '../core/types.js';
+import {
+  extractAttractions as extractAttractionsFromContent,
+  extractHotels as extractHotelsFromContent,
+} from './extractor.js';
 
 export interface PharmacyResult {
   id: string;
@@ -126,6 +130,34 @@ export async function findAttractions(
 
       const exaResults = await exaSearchDestination(destination, 'attractions');
 
+      // If Gemini is available, use LLM to extract actual attraction names
+      if (isGeminiEnabled() && exaResults.length > 0) {
+        console.log(chalk.dim('  Extracting attractions with Gemini AI...'));
+
+        const rawContent = exaResults.map((r) => ({
+          title: r.title,
+          snippet: r.description,
+          url: r.url,
+        }));
+
+        const extracted = await extractAttractionsFromContent(destination, rawContent);
+
+        if (extracted.length > 0) {
+          const results: AttractionResult[] = extracted.slice(0, maxResults).map((a, i) => ({
+            id: `exa-attraction-${i + 1}`,
+            name: a.name,
+            category: a.category,
+            description: a.description,
+            duration: a.duration,
+            price: a.price,
+            source: 'exa' as const,
+          }));
+
+          return { results, searchMode: 'real' };
+        }
+      }
+
+      // Fallback: use raw Exa results (webpage titles)
       const results: AttractionResult[] = exaResults.slice(0, maxResults).map((r, i) => ({
         id: `exa-attraction-${i + 1}`,
         name: r.title,
@@ -175,6 +207,34 @@ export async function findHotels(
 
       const exaResults = await exaSearchDestination(destination, 'hotels');
 
+      // If Gemini is available, use LLM to extract actual hotel names
+      if (isGeminiEnabled() && exaResults.length > 0) {
+        console.log(chalk.dim('  Extracting hotels with Gemini AI...'));
+
+        const rawContent = exaResults.map((r) => ({
+          title: r.title,
+          snippet: r.description,
+          url: r.url,
+        }));
+
+        const extracted = await extractHotelsFromContent(destination, budget, rawContent);
+
+        if (extracted.length > 0) {
+          const results: HotelResult[] = extracted.slice(0, maxResults).map((h, i) => ({
+            id: `exa-hotel-${i + 1}`,
+            name: h.name,
+            rating: h.rating,
+            pricePerNight: h.pricePerNight,
+            location: h.location || destination,
+            amenities: h.amenities,
+            source: 'exa' as const,
+          }));
+
+          return { results, searchMode: 'real' };
+        }
+      }
+
+      // Fallback: use raw Exa results
       const results: HotelResult[] = exaResults.slice(0, maxResults).map((r, i) => ({
         id: `exa-hotel-${i + 1}`,
         name: r.title,
